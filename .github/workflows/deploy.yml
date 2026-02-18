@@ -1,0 +1,26 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - id: 'auth'
+      uses: 'google-github-actions/auth@v1'
+      with:
+        credentials_json: '${{ secrets.FIREBASE_CREDENTIALS }}'
+
+    - name: Deploy to Cloud Run
+      uses: google-github-actions/deploy-cloudrun@v1
+      with:
+        service: levkatan-backend
+        region: us-central1
+        source: .
+        env_vars: |
+          FIREBASE_CREDENTIALS=${{ secrets.FIREBASE_CREDENTIALS }}
+          FLASK_SECRET_KEY=${{ secrets.FLASK_SECRET_KEY }}
