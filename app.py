@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
 from dotenv import load_dotenv
+
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -16,33 +17,33 @@ app = Flask(__name__)
 CORS(app)
 
 # --- CONFIGURATION ---
-# FLASK_SECRET_KEY is still good practice for internal Flask security
-app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev_key_fallback')
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'lev_katan_fallback_secret')
 
 # --- FIREBASE SETUP ---
-# In production (Cloud Run), we use the JSON string from the environment variable.
-# In local dev, we can fallback to a file if you prefer, or just set the ENV var locally.
 firebase_creds_json = os.getenv('FIREBASE_CREDENTIALS')
 
 if firebase_creds_json:
-    cred = credentials.Certificate(json.loads(firebase_creds_json))
+    # Production (Render): Load from environment variable string
+    cred_dict = json.loads(firebase_creds_json)
+    cred = credentials.Certificate(cred_dict)
 else:
-    # If no env var, try looking for a local file (for local testing convenience)
-    # You should download your key and name it 'service-account-file.json' for local dev
+    # Local Dev: Look for the downloaded JSON file
     try:
         cred = credentials.Certificate('service-account-file.json')
     except Exception:
-        print("WARNING: No Firebase Credentials found. App will crash on DB access.")
+        print("WARNING: No Firebase Credentials found. Ensure ENV vars or local JSON file exist.")
         cred = None
 
 if cred:
-    firebase_admin.initialize_app(cred)
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        firebase_admin.initialize_app(cred)
     db = firestore.client()
 else:
     db = None
 
 # --- DECORATORS ---
-
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -54,23 +55,20 @@ def token_required(f):
         
         token = token_header.split(" ")[1]
         try:
-            # Verify the ID token sent by the frontend (Firebase Client SDK)
+            # Verify Firebase Auth ID Token
             decoded_token = auth.verify_id_token(token)
             uid = decoded_token['uid']
             
-            # Fetch user details from Firestore 'users' collection
-            # We store extra data (role, phone) that Auth doesn't hold natively
+            # Fetch user details from Firestore
             user_doc = db.collection('users').document(uid).get()
             
             if user_doc.exists:
                 user_data = user_doc.to_dict()
-                user_data['user_id'] = uid # Normalize ID access
+                user_data['user_id'] = uid
             else:
-                # Fallback if user registered via Auth but not DB (shouldn't happen)
                 user_data = {'user_id': uid, 'role': 'user', 'username': 'Unknown'}
 
             request.user_data = user_data
-            
         except Exception as e:
             return jsonify({'message': 'Invalid Token', 'error': str(e)}), 401
             
@@ -82,35 +80,31 @@ def role_required(allowed_roles):
         @wraps(f)
         def decorated(*args, **kwargs):
             if request.method == 'OPTIONS': return jsonify({}), 200
-            
-            # Re-use the logic from token_required or assume it's chained
-            # For safety, we'll re-verify or rely on request.user_data set by token_required
             if not hasattr(request, 'user_data'):
                 return jsonify({'message': 'Auth required'}), 401
             
             user_role = request.user_data.get('role', 'user')
             if user_role not in allowed_roles:
-                return jsonify({'message': 'Access denied'}), 403
-            
+                return jsonify({'message': 'Access denied. Insufficient permissions.'}), 403
             return f(*args, **kwargs)
         return decorated
     return decorator
 
 # --- AUTH ROUTES ---
-
-# Login is handled entirely on the Frontend using Firebase SDK.
-# This route creates the User Document in Firestore after they sign up.
 @app.route('/api/register', methods=['POST'])
 def register():
+    """
+    Called by frontend AFTER creating user in Firebase Auth.
+    Stores extra user details in Firestore.
+    """
     data = request.json
-    uid = data.get('uid') # Passed from frontend after successful Firebase Auth creation
+    uid = data.get('uid')
     email = data.get('email')
     
     if not uid:
         return jsonify({"message": "UID missing"}), 400
 
     try:
-        # Create user document
         user_data = {
             'full_name': data.get('fullName'),
             'username': data.get('username'),
@@ -119,20 +113,16 @@ def register():
             'role': 'user', # Default role
             'created_at': firestore.SERVER_TIMESTAMP
         }
-        
-        # Use UID as the document ID for easy lookup
+        # Save to Firestore with UID as Document ID
         db.collection('users').document(uid).set(user_data)
-        
         return jsonify({"message": "Registered successfully"}), 200
     except Exception as e:
         return jsonify({"message": str(e)}), 400
 
 # --- USER PROFILE ---
-
 @app.route('/api/user/me', methods=['GET'])
 @token_required
 def get_user_profile():
-    # request.user_data is already populated by the decorator
     return jsonify(request.user_data), 200
 
 @app.route('/api/user/me', methods=['PUT'])
@@ -140,35 +130,35 @@ def get_user_profile():
 def update_user_profile():
     uid = request.user_data['user_id']
     data = request.json
-    
     try:
         update_data = {
             'full_name': data.get('full_name'),
             'email': data.get('email'),
             'phone_number': data.get('phone_number')
         }
-        # Remove None values
         update_data = {k: v for k, v in update_data.items() if v is not None}
-        
         db.collection('users').document(uid).update(update_data)
         return jsonify({"message": "Profile updated"}), 200
     except Exception as e:
         return jsonify({"message": f"Update error: {e}"}), 400
 
 # --- CATALOG & PRODUCTS ---
-
 @app.route('/api/products', methods=['GET'])
 def get_products():
     try:
-        # Query: status == 'available'
         docs = db.collection('products').where('status', '==', 'available').stream()
-        
         products = []
         for doc in docs:
             p = doc.to_dict()
-            p['id'] = doc.id # Firestore ID is a string
-            products.append(p)
-            
+            # Standardize output for the frontend
+            products.append({
+                'id': doc.id,
+                'name': p.get('product_name'),
+                'category': p.get('category'),
+                'status': p.get('status'),
+                'description': p.get('description', ''),
+                'donator_username': p.get('donator_username', '')
+            })
         return jsonify(products), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -177,18 +167,18 @@ def get_products():
 @token_required
 def borrow_product():
     data = request.json
-    product_id = data.get('product_id') # String ID
+    product_id = data.get('product_id')
     returned_date_str = data.get('returned_date')
     uid = request.user_data['user_id']
     
     try:
-        # 1. Fetch Limits
+        # Check System Limits
         settings_ref = db.collection('system_settings').document('config').get()
         settings = settings_ref.to_dict() if settings_ref.exists else {}
         max_items = int(settings.get('max_borrow_items', 3))
         max_days = int(settings.get('max_borrow_days', 14))
 
-        # 2. Check User's Current Borrow Count
+        # Check Active Borrows Count
         active_requests = db.collection('borrow_requests')\
             .where('user_id', '==', uid)\
             .where('status', 'in', ['pending', 'approved', 'confirmation_pending'])\
@@ -197,40 +187,33 @@ def borrow_product():
         if len(active_requests) >= max_items:
             return jsonify({"message": f"הגעת למכסת ההשאלות שלך ({max_items} פריטים)."}), 400
 
-        # 3. Validate Date
+        # Validate Date
         return_date = datetime.datetime.strptime(returned_date_str, "%Y-%m-%d").date()
         today = datetime.datetime.now().date()
-        
         if return_date <= today:
             return jsonify({"message": "תאריך ההחזרה חייב להיות עתידי"}), 400
-            
         if (return_date - today).days > max_days:
             return jsonify({"message": f"תקופת ההשאלה חורגת מהמותר ({max_days} ימים)."}), 400
 
-        # 4. Transactional Update (Ensure product is still available)
+        # Transactional update (Lock product)
         product_ref = db.collection('products').document(product_id)
         
-        # We use a transaction to ensure atomicity
         transaction = db.transaction()
-        
         @firestore.transactional
         def borrow_in_transaction(transaction, product_ref):
             snapshot = product_ref.get(transaction=transaction)
-            if not snapshot.exists:
-                raise Exception("Product not found")
-            
-            if snapshot.get('status') != 'available':
+            if not snapshot.exists or snapshot.get('status') != 'available':
                 raise Exception("Product not available")
             
-            # Update product
+            # Update product status
             transaction.update(product_ref, {'status': 'unavailable'})
             
-            # Create request
+            # Create borrow request
             new_req_ref = db.collection('borrow_requests').document()
             transaction.set(new_req_ref, {
                 'user_id': uid,
                 'product_id': product_id,
-                'product_name': snapshot.get('product_name'), # Denormalize name for easier display
+                'product_name': snapshot.get('product_name'),
                 'returned_date': returned_date_str,
                 'request_date': firestore.SERVER_TIMESTAMP,
                 'status': 'pending'
@@ -255,15 +238,16 @@ def get_my_requests():
         requests = []
         for doc in docs:
             r = doc.to_dict()
-            # Handle date formatting
             req_date = r.get('request_date')
-            if req_date:
-                r['date'] = req_date.strftime("%Y-%m-%d %H:%M")
+            date_str = req_date.strftime("%Y-%m-%d %H:%M") if req_date else ''
             
-            r['id'] = doc.id
-            r['product'] = r.get('product_name', 'Unknown') # Use denormalized name
-            requests.append(r)
-            
+            requests.append({
+                'id': doc.id,
+                'product': r.get('product_name', 'Unknown'),
+                'date': date_str,
+                'status': r.get('status'),
+                'returned_date': r.get('returned_date')
+            })
         return jsonify(requests), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -285,21 +269,28 @@ def request_donation():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- EMPLOYEE ROUTES ---
-
+# --- EMPLOYEE ROUTES (Manage Products) ---
 @app.route('/api/employee/products', methods=['GET'])
 @token_required
 @role_required(['admin', 'employee'])
 def get_all_products_employee():
-    # Firestore doesn't support complex JOINs easily. 
-    # For a small dataset, we fetch items and populate borrower info if needed.
-    # For this simplified migration, we will fetch products and their statuses.
     try:
+        # Firestore cannot JOIN. We fetch products, then manually attach borrower name if borrowed.
         docs = db.collection('products').order_by('publish_date', direction=firestore.Query.DESCENDING).stream()
         products = []
         for doc in docs:
             p = doc.to_dict()
             p['id'] = doc.id
+            p['publish_date'] = str(p.get('publish_date'))
+            
+            # Find active borrower if status is borrowed
+            if p.get('status') == 'borrowed':
+                borrows = db.collection('borrow_requests').where('product_id', '==', doc.id).where('status', '==', 'approved').limit(1).get()
+                if borrows:
+                    user_id = borrows[0].to_dict().get('user_id')
+                    user_doc = db.collection('users').document(user_id).get()
+                    p['borrower_name'] = user_doc.to_dict().get('username') if user_doc.exists else 'Unknown'
+            
             products.append(p)
         return jsonify(products), 200
     except Exception as e:
@@ -323,6 +314,20 @@ def create_product():
         return jsonify({"message": "Product created", "id": ref.id}), 201
     except Exception as e:
         return jsonify({"message": str(e)}), 400
+
+@app.route('/api/employee/products/<product_id>', methods=['GET'])
+@token_required
+@role_required(['admin', 'employee'])
+def get_single_product(product_id):
+    try:
+        doc = db.collection('products').document(product_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            return jsonify(data), 200
+        return jsonify({"message": "Not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/employee/products/<product_id>', methods=['PUT'])
 @token_required
@@ -351,35 +356,16 @@ def delete_product(product_id):
     except Exception as e:
         return jsonify({"message": str(e)}), 500
 
-@app.route('/api/employee/products/<product_id>', methods=['GET'])
-@token_required
-@role_required(['admin', 'employee'])
-def get_single_product(product_id):
-    try:
-        doc = db.collection('products').document(product_id).get()
-        if doc.exists:
-            data = doc.to_dict()
-            data['id'] = doc.id
-            return jsonify(data), 200
-        return jsonify({"message": "Not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- EMPLOYEE REQUESTS MANAGEMENT ---
-
+# --- EMPLOYEE ROUTES (Manage Requests) ---
 @app.route('/api/employee/requests', methods=['GET'])
 @token_required
 @role_required(['admin', 'employee'])
 def get_all_requests():
     try:
-        # Get pending requests
         docs = db.collection('borrow_requests').where('status', '==', 'pending').stream()
         requests = []
         for doc in docs:
             r = doc.to_dict()
-            r['id'] = doc.id
-            
-            # Fetch Username (Manual Join)
             user_doc = db.collection('users').document(r['user_id']).get()
             username = user_doc.to_dict().get('username') if user_doc.exists else 'Unknown'
             
@@ -409,7 +395,6 @@ def update_request_status(req_id):
         
         req_data = req_doc.to_dict()
         product_id = req_data['product_id']
-        
         batch = db.batch()
         
         if new_status == 'rejected':
@@ -424,31 +409,103 @@ def update_request_status(req_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- EXTENSIONS ---
+# --- DONATIONS EMPLOYEE ---
+@app.route('/api/employee/donations', methods=['GET'])
+@token_required
+@role_required(['admin', 'employee'])
+def get_donations_emp():
+    try:
+        docs = db.collection('donation_requests').where('status', '==', 'donation_pending').order_by('created_at', direction=firestore.Query.DESCENDING).stream()
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            d['id'] = doc.id
+            d['created_at'] = str(d.get('created_at'))
+            res.append(d)
+        return jsonify(res), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+@app.route('/api/employee/donations/<don_id>/approve', methods=['POST'])
+@token_required
+@role_required(['admin', 'employee'])
+def approve_donation(don_id):
+    data = request.json
+    try:
+        # Create new product from donation
+        new_prod = {
+            'product_name': data.get('product_name'),
+            'category': data.get('category'),
+            'description': data.get('description'),
+            'donator_username': data.get('donator_username'),
+            'status': 'available',
+            'publish_date': firestore.SERVER_TIMESTAMP
+        }
+        db.collection('products').add(new_prod)
+        db.collection('donation_requests').document(don_id).update({'status': 'approved'})
+        return jsonify({"message": "Donation converted to product"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/employee/donations/<don_id>/reject', methods=['DELETE'])
+@token_required
+@role_required(['admin', 'employee'])
+def reject_donation(don_id):
+    try:
+        db.collection('donation_requests').document(don_id).delete()
+        return '', 204
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- RETURN PRODUCT ---
+@app.route('/api/return', methods=['POST'])
+@token_required
+def return_product():
+    data = request.json
+    borrow_id = data.get('borrow_id')
+    uid = request.user_data['user_id']
+    
+    try:
+        req_ref = db.collection('borrow_requests').document(borrow_id)
+        req = req_ref.get()
+        
+        if not req.exists or req.to_dict()['user_id'] != uid or req.to_dict()['status'] != 'approved':
+             return jsonify({"message": "Borrow request not found or not active."}), 404
+             
+        product_id = req.to_dict()['product_id']
+        batch = db.batch()
+        batch.update(req_ref, {'status': 'returned'})
+        batch.update(db.collection('products').document(product_id), {'status': 'available'})
+        batch.commit()
+        return jsonify({"message": "Product returned successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- EXTENSION REQUESTS ---
 @app.route('/api/extensions', methods=['POST'])
 @token_required
 def request_extension():
     data = request.json
     borrow_id = data.get('borrow_id')
     new_date = data.get('new_returned_date')
+    uid = request.user_data['user_id']
     
     try:
-        # Check existing
         existing = db.collection('extension_requests')\
             .where('borrow_id', '==', borrow_id)\
             .where('status', '==', 'extension_pending').get()
             
         if len(existing) > 0:
-             return jsonify({"message": "בקשה ממתינה כבר קיימת"}), 400
+             return jsonify({"message": "כבר קיימת בקשת הארכה ממתינה עבור מוצר זה."}), 400
              
         db.collection('extension_requests').add({
             'borrow_id': borrow_id,
             'new_returned_date': new_date,
             'status': 'extension_pending',
-            'user_id': request.user_data['user_id'] # Add user_id for easier querying
+            'user_id': uid,
+            'request_date': firestore.SERVER_TIMESTAMP
         })
-        return jsonify({"message": "Request sent"}), 201
+        return jsonify({"message": "בקשת ההארכה נשלחה בהצלחה! ממתין לאישור עובד."}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -461,7 +518,6 @@ def get_extension_requests_emp():
         exts = []
         for doc in docs:
             e = doc.to_dict()
-            # Fetch related details (Manual Join)
             borrow_doc = db.collection('borrow_requests').document(e['borrow_id']).get()
             if borrow_doc.exists:
                 b_data = borrow_doc.to_dict()
@@ -484,7 +540,7 @@ def get_extension_requests_emp():
 @role_required(['admin', 'employee'])
 def update_extension_status(ext_id):
     data = request.json
-    status = data.get('status') # 'approved' or 'rejected'
+    status = data.get('status')
     new_status = f"extension_{status}"
     
     try:
@@ -501,102 +557,21 @@ def update_extension_status(ext_id):
             batch.update(db.collection('borrow_requests').document(borrow_id), {'returned_date': new_date})
             
         batch.commit()
-        return jsonify({"message": "Updated"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- DONATIONS EMPLOYEE ---
-
-@app.route('/api/employee/donations', methods=['GET'])
-@token_required
-@role_required(['admin', 'employee'])
-def get_donations_emp():
-    try:
-        docs = db.collection('donation_requests').where('status', '==', 'donation_pending').stream()
-        res = []
-        for doc in docs:
-            d = doc.to_dict()
-            d['id'] = doc.id
-            d['created_at'] = str(d.get('created_at'))
-            res.append(d)
-        return jsonify(res), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/employee/donations/<don_id>/approve', methods=['POST'])
-@token_required
-@role_required(['admin', 'employee'])
-def approve_donation(don_id):
-    data = request.json
-    try:
-        # Create product
-        new_prod = {
-            'product_name': data.get('product_name'),
-            'category': data.get('category'),
-            'description': data.get('description'),
-            'donator_username': data.get('donator_username'),
-            'status': 'available',
-            'publish_date': firestore.SERVER_TIMESTAMP
-        }
-        db.collection('products').add(new_prod)
-        
-        # Mark donation approved
-        db.collection('donation_requests').document(don_id).update({'status': 'approved'})
-        
-        return jsonify({"message": "Donation approved"}), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/employee/donations/<don_id>/reject', methods=['DELETE'])
-@token_required
-@role_required(['admin', 'employee'])
-def reject_donation(don_id):
-    try:
-        db.collection('donation_requests').document(don_id).delete()
-        return jsonify({"message": "Rejected"}), 204
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- RETURN PRODUCT ---
-
-@app.route('/api/return', methods=['POST'])
-@token_required
-def return_product():
-    data = request.json
-    borrow_id = data.get('borrow_id')
-    uid = request.user_data['user_id']
-    
-    try:
-        req_ref = db.collection('borrow_requests').document(borrow_id)
-        req = req_ref.get()
-        
-        if not req.exists or req.to_dict()['user_id'] != uid or req.to_dict()['status'] != 'approved':
-             return jsonify({"message": "Invalid request"}), 404
-             
-        product_id = req.to_dict()['product_id']
-        
-        batch = db.batch()
-        batch.update(req_ref, {'status': 'returned'})
-        batch.update(db.collection('products').document(product_id), {'status': 'available'})
-        batch.commit()
-        
-        return jsonify({"message": "Returned"}), 200
+        return jsonify({"message": f"Extension status updated to {new_status}"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 # --- ADMIN USER MANAGEMENT ---
-
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
 @role_required(['admin'])
 def get_all_users():
     try:
-        # 1. Fetch from Firestore (metadata)
         docs = db.collection('users').stream()
         users = []
         for doc in docs:
             u = doc.to_dict()
-            u['id'] = doc.id # Use UID as ID
+            u['id'] = doc.id
             users.append(u)
         return jsonify(users), 200
     except Exception as e:
@@ -618,16 +593,16 @@ def update_user_role(uid):
 @role_required(['admin'])
 def delete_user(uid):
     try:
-        # Delete from Firestore
         db.collection('users').document(uid).delete()
-        # Delete from Firebase Auth
-        auth.delete_user(uid)
+        try:
+            auth.delete_user(uid)
+        except Exception:
+            pass # Ignore if auth user doesn't exist
         return jsonify({"message": "User deleted"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- CONFIG ---
-
+# --- CONFIG & SYSTEM LIMITS ---
 @app.route('/api/config', methods=['GET'])
 def get_config():
     try:
@@ -645,10 +620,10 @@ def update_config():
     data = request.json
     try:
         db.collection('system_settings').document('config').set({
-            'max_borrow_days': data.get('max_borrow_days'),
-            'max_borrow_items': data.get('max_borrow_items')
+            'max_borrow_days': int(data.get('max_borrow_days')),
+            'max_borrow_items': int(data.get('max_borrow_items'))
         }, merge=True)
-        return jsonify({"message": "Config updated"}), 200
+        return jsonify({"message": "Settings updated successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -657,20 +632,17 @@ def update_config():
 def get_borrow_status():
     uid = request.user_data['user_id']
     try:
-        # Get Config
         settings_ref = db.collection('system_settings').document('config').get()
         settings = settings_ref.to_dict() if settings_ref.exists else {}
         max_items = int(settings.get('max_borrow_items', 3))
         max_days = int(settings.get('max_borrow_days', 14))
         
-        # Count active loans
-        # Note: Streaming all is inefficient for large scale, but fine for MVP
         docs = db.collection('borrow_requests')\
             .where('user_id', '==', uid)\
             .where('status', 'in', ['pending', 'approved', 'confirmation_pending'])\
-            .stream()
+            .get()
             
-        current_count = sum(1 for _ in docs)
+        current_count = len(docs)
         
         return jsonify({
             "current_borrowed": current_count,
@@ -682,7 +654,5 @@ def get_borrow_status():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Cloud Run will set PORT env var, defaults to 8080
     port = int(os.environ.get('PORT', 8080))
-
     app.run(host='0.0.0.0', port=port)
