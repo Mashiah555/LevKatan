@@ -1,668 +1,432 @@
 import os
-import jwt
-import psycopg2
-import bcrypt
+import json
+import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
 from functools import wraps
+from dotenv import load_dotenv
+# Firebase Admin SDK
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL")
+# --- CONFIGURATION ---
+# FLASK_SECRET_KEY is still good practice for internal Flask security
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'dev_key_fallback')
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-if not JWT_SECRET_KEY:  # Forces you to have a secure key in .env. Fails safely if missing.
-    raise ValueError("No JWT_SECRET_KEY set for Flask application")
+# --- FIREBASE SETUP ---
+# In production (Cloud Run), we use the JSON string from the environment variable.
+# In local dev, we can fallback to a file if you prefer, or just set the ENV var locally.
+firebase_creds_json = os.getenv('FIREBASE_CREDENTIALS')
 
-JWT_ALGORITHM = "HS256"
-
-# --- DB Helper ---
-def get_db_connection():
+if firebase_creds_json:
+    cred = credentials.Certificate(json.loads(firebase_creds_json))
+else:
+    # If no env var, try looking for a local file (for local testing convenience)
+    # You should download your key and name it 'service-account-file.json' for local dev
     try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-        return conn
-    except Exception as e:
-        print(f"DB Connection Error: {e}")
-        return None
+        cred = credentials.Certificate('service-account-file.json')
+    except Exception:
+        print("WARNING: No Firebase Credentials found. App will crash on DB access.")
+        cred = None
 
-# --- Decorators ---
+if cred:
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+else:
+    db = None
+
+# --- DECORATORS ---
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method == 'OPTIONS': return jsonify({}), 200
+        
         token_header = request.headers.get('Authorization')
         if not token_header or not token_header.startswith('Bearer '):
             return jsonify({'message': 'Token missing'}), 401
+        
+        token = token_header.split(" ")[1]
         try:
-            token = token_header[7:]
-            data = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            request.user_data = data # Store user info for the route to use
-        except Exception:
-            return jsonify({'message': 'Invalid Token'}), 401
+            # Verify the ID token sent by the frontend (Firebase Client SDK)
+            decoded_token = auth.verify_id_token(token)
+            uid = decoded_token['uid']
+            
+            # Fetch user details from Firestore 'users' collection
+            # We store extra data (role, phone) that Auth doesn't hold natively
+            user_doc = db.collection('users').document(uid).get()
+            
+            if user_doc.exists:
+                user_data = user_doc.to_dict()
+                user_data['user_id'] = uid # Normalize ID access
+            else:
+                # Fallback if user registered via Auth but not DB (shouldn't happen)
+                user_data = {'user_id': uid, 'role': 'user', 'username': 'Unknown'}
+
+            request.user_data = user_data
+            
+        except Exception as e:
+            return jsonify({'message': 'Invalid Token', 'error': str(e)}), 401
+            
         return f(*args, **kwargs)
     return decorated
 
-def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if request.method == 'OPTIONS': return jsonify({}), 200
-        token_header = request.headers.get('Authorization')
-        if not token_header: return jsonify({'message': 'Token missing'}), 401
-        try:
-            token = token_header.split(" ")[1]
-            data = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            if data['role'] != 'admin':
-                return jsonify({'message': 'Admin access required'}), 403
-        except Exception:
-            return jsonify({'message': 'Invalid Token'}), 401
-        return f(*args, **kwargs)
-    return decorated
+def role_required(allowed_roles):
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if request.method == 'OPTIONS': return jsonify({}), 200
+            
+            # Re-use the logic from token_required or assume it's chained
+            # For safety, we'll re-verify or rely on request.user_data set by token_required
+            if not hasattr(request, 'user_data'):
+                return jsonify({'message': 'Auth required'}), 401
+            
+            user_role = request.user_data.get('role', 'user')
+            if user_role not in allowed_roles:
+                return jsonify({'message': 'Access denied'}), 403
+            
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
-def employee_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if request.method == 'OPTIONS': return jsonify({}), 200
-        token_header = request.headers.get('Authorization')
-        if not token_header: return jsonify({'message': 'Token missing'}), 401
-        try:
-            token = token_header.split(" ")[1]
-            data = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-            if data['role'] not in ['admin', 'employee']:
-                return jsonify({'message': 'Employee access required'}), 403
-        except Exception:
-            return jsonify({'message': 'Invalid Token'}), 401
-        return f(*args, **kwargs)
-    return decorated
+# --- AUTH ROUTES ---
 
-# --- AUTH ROUTES (Login/Register) ---
+# Note: Login is handled entirely on the Frontend using Firebase SDK.
+# This route creates the User Document in Firestore after they sign up.
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
-    full_name = data.get('fullName')
-    username = data.get('username')
-    phone_number = data.get('phone_number')
+    uid = data.get('uid') # Passed from frontend after successful Firebase Auth creation
     email = data.get('email')
-    passwd = data.get('password')
     
-    # Basic validation
-    if not all([full_name, username, email, passwd]):
-        return jsonify({"message": "Missing required fields"}), 400
+    if not uid:
+        return jsonify({"message": "UID missing"}), 400
 
-    password_bytes = passwd.encode('utf-8')
-    hashed_password = bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        cur.execute("INSERT INTO personnal_infos (full_name, username, phone_number, email, passwd, role) VALUES (%s, %s, %s, %s, %s, 'user') RETURNING id;", (full_name, username, phone_number, email, hashed_password))
-        user_id = cur.fetchone()[0]
-        conn.commit()
-        return jsonify({"message": "Registered", "userId": user_id}), 200
+        # Create user document
+        user_data = {
+            'full_name': data.get('fullName'),
+            'username': data.get('username'),
+            'phone_number': data.get('phone_number'),
+            'email': email,
+            'role': 'user', # Default role
+            'created_at': firestore.SERVER_TIMESTAMP
+        }
+        
+        # Use UID as the document ID for easy lookup
+        db.collection('users').document(uid).set(user_data)
+        
+        return jsonify({"message": "Registered successfully"}), 200
     except Exception as e:
-        conn.rollback()
         return jsonify({"message": str(e)}), 400
-    finally:
-        conn.close()
 
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.json
-    email = data.get('email')
-    password = data.get('password')
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id, username, passwd, role FROM personnal_infos WHERE email = %s", (email,))
-    user = cur.fetchone()
-    conn.close()
-    if user and bcrypt.checkpw(password.encode('utf-8'), user[2].encode('utf-8')):
-        token = jwt.encode({'user_id': user[0], 'username': user[1], 'role': user[3], 'exp': datetime.utcnow() + timedelta(hours=24)}, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-        return jsonify({"message": "Success", "username": user[1], "role": user[3], "token": token}), 200
-    return jsonify({"message": "Invalid credentials"}), 401
+# --- USER PROFILE ---
 
-
-# ----- USER ROUTES (Catalog / Borrowing requests / Profile / Donation requests) -----
-
-#---- PROFILE------
 @app.route('/api/user/me', methods=['GET'])
 @token_required
 def get_user_profile():
-    user_id = request.user_data['user_id']
-    
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "INTERNAL SERVOR ERROR (DB)"}), 500
-    cur = conn.cursor()
-    
-    try:
-        # Selects the user's personal data
-        sql = """
-            SELECT username, full_name, email, phone_number 
-            FROM personnal_infos 
-            WHERE id = %s;
-        """
-        cur.execute(sql, (user_id,))
-        user_info = cur.fetchone()
-        
-        if user_info:
-            columns = ['username', 'full_name', 'email', 'phone_number']
-            result = dict(zip(columns, user_info))
-            return jsonify(result), 200
-        else:
-            return jsonify({"message": "User profile not found"}), 404
-            
-    except Exception as e:
-        print(f"Error retrieving profile: {e}")
-        return jsonify({"message": "Server error"}), 500
-    finally:
-        conn.close()
-
+    # request.user_data is already populated by the decorator
+    return jsonify(request.user_data), 200
 
 @app.route('/api/user/me', methods=['PUT'])
 @token_required
 def update_user_profile():
-    user_id = request.user_data['user_id']
+    uid = request.user_data['user_id']
     data = request.json
     
-    # Editable data sent by the Frontend: The username cannot be changed
-    full_name = data.get('full_name')
-    email = data.get('email')
-    phone_number = data.get('phone_number')
-    
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "INTERNAL SERVER ERROR (DB)"}), 500
-    cur = conn.cursor()
-    
     try:
-        # Mise à jour des champs modifiables.
-        sql = """
-            UPDATE personnal_infos 
-            SET full_name = %s, 
-                email = %s, 
-                phone_number = %s
-            WHERE id = %s 
-            RETURNING id;
-        """
-        cur.execute(sql, (full_name, email, phone_number, user_id))
+        update_data = {
+            'full_name': data.get('full_name'),
+            'email': data.get('email'),
+            'phone_number': data.get('phone_number')
+        }
+        # Remove None values
+        update_data = {k: v for k, v in update_data.items() if v is not None}
         
-        updated_id = cur.fetchone()
-        
-        if updated_id:
-            conn.commit()
-            return jsonify({"message": "Profil mis à jour"}), 200
-        else:
-            conn.rollback()
-            return jsonify({"message": "Profil non trouvé"}), 404
-            
+        db.collection('users').document(uid).update(update_data)
+        return jsonify({"message": "Profile updated"}), 200
     except Exception as e:
-        conn.rollback()
-        print(f"Error updating profile: {e}")
-        return jsonify({"message": f"update error: {e}"}), 400
-    finally:
-        conn.close()
+        return jsonify({"message": f"Update error: {e}"}), 400
 
-#--- CATALOG ----
+# --- CATALOG & PRODUCTS ---
+
 @app.route('/api/products', methods=['GET'])
 def get_products():
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        # UPDATED: Select donator_username
-        cur.execute("SELECT id, product_name, category, status, description, donator_username FROM products WHERE status = 'available';")
-        products = [{
-            'id': r[0], 
-            'name': r[1], 
-            'category': r[2], 
-            'status': r[3],
-            'description': r[4], 
-            'donator_username': r[5] # Updated key
-        } for r in cur.fetchall()]
+        # Query: status == 'available'
+        docs = db.collection('products').where('status', '==', 'available').stream()
+        
+        products = []
+        for doc in docs:
+            p = doc.to_dict()
+            p['id'] = doc.id # Firestore ID is a string
+            products.append(p)
+            
+        return jsonify(products), 200
     except Exception as e:
-        print(f"Error fetching products: {e}")
-        conn.rollback()
-        # Fallback query if columns are missing
-        cur.execute("SELECT id, product_name, category, status FROM products WHERE status = 'available';")
-        products = [{'id': r[0], 'name': r[1], 'category': r[2], 'status': r[3], 'description': '', 'donator_username': ''} for r in cur.fetchall()]
-
-    conn.close()
-    return jsonify(products), 200
-
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/borrow', methods=['POST'])
 @token_required
 def borrow_product():
     data = request.json
-    product_id = data.get('product_id')
-    returned_date_str = data.get('returned_date') # YYYY-MM-DD
-    user_id = request.user_data['user_id']
+    product_id = data.get('product_id') # String ID
+    returned_date_str = data.get('returned_date')
+    uid = request.user_data['user_id']
     
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
         # 1. Fetch Limits
-        cur.execute("SELECT setting_key, setting_value FROM system_settings;")
-        rows = cur.fetchall()
-        settings = {row[0]: row[1] for row in rows}
+        settings_ref = db.collection('system_settings').document('config').get()
+        settings = settings_ref.to_dict() if settings_ref.exists else {}
         max_items = int(settings.get('max_borrow_items', 3))
         max_days = int(settings.get('max_borrow_days', 14))
 
-        # 2. Check User's Current Limit
-        cur.execute("SELECT COUNT(*) FROM borrow_requests WHERE user_id = %s AND status IN ('pending', 'approved', 'confirmation_pending')", (user_id,))
-        current_count = cur.fetchone()[0]
-        
-        if current_count >= max_items:
+        # 2. Check User's Current Borrow Count
+        # Firestore cannot easily do "count" without reading, but 'count()' aggregation is available in newer SDKs.
+        # For simplicity, we stream query.
+        active_requests = db.collection('borrow_requests')\
+            .where('user_id', '==', uid)\
+            .where('status', 'in', ['pending', 'approved', 'confirmation_pending'])\
+            .get()
+            
+        if len(active_requests) >= max_items:
             return jsonify({"message": f"הגעת למכסת ההשאלות שלך ({max_items} פריטים)."}), 400
 
         # 3. Validate Date
-        if not returned_date_str:
-            return jsonify({"message": "Date is required"}), 400
-            
-        return_date = datetime.strptime(returned_date_str, "%Y-%m-%d").date()
-        today = datetime.now().date()
+        return_date = datetime.datetime.strptime(returned_date_str, "%Y-%m-%d").date()
+        today = datetime.datetime.now().date()
         
         if return_date <= today:
             return jsonify({"message": "תאריך ההחזרה חייב להיות עתידי"}), 400
             
-        delta = return_date - today
-        if delta.days > max_days:
+        if (return_date - today).days > max_days:
             return jsonify({"message": f"תקופת ההשאלה חורגת מהמותר ({max_days} ימים)."}), 400
 
-        # 4. Check Availability & Create Request (Existing Logic)
-        cur.execute("SELECT status FROM products WHERE id = %s", (product_id,))
-        status = cur.fetchone()
-        if not status or status[0] != 'available':
-            return jsonify({"message": "Product not available"}), 400
-            
-        cur.execute("INSERT INTO borrow_requests (user_id, product_id, returned_date) VALUES (%s, %s, %s)", (user_id, product_id, returned_date_str))
-        cur.execute("UPDATE products SET status = 'unavailable' WHERE id = %s", (product_id,))
+        # 4. Transactional Update (Ensure product is still available)
+        product_ref = db.collection('products').document(product_id)
         
-        conn.commit()
+        # We use a transaction to ensure atomicity
+        transaction = db.transaction()
+        
+        @firestore.transactional
+        def borrow_in_transaction(transaction, product_ref):
+            snapshot = product_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise Exception("Product not found")
+            
+            if snapshot.get('status') != 'available':
+                raise Exception("Product not available")
+            
+            # Update product
+            transaction.update(product_ref, {'status': 'unavailable'})
+            
+            # Create request
+            new_req_ref = db.collection('borrow_requests').document()
+            transaction.set(new_req_ref, {
+                'user_id': uid,
+                'product_id': product_id,
+                'product_name': snapshot.get('product_name'), # Denormalize name for easier display
+                'returned_date': returned_date_str,
+                'request_date': firestore.SERVER_TIMESTAMP,
+                'status': 'pending'
+            })
+            
+        borrow_in_transaction(transaction, product_ref)
         return jsonify({"message": "בקשתך נשלחה בהצלחה!"}), 200
+
     except Exception as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
+        return jsonify({"message": str(e)}), 400
 
-
-#---BORROWING REQUEST---
 @app.route('/api/my-requests', methods=['GET'])
 @token_required
 def get_my_requests():
-    user_id = request.user_data['user_id']
-    conn = get_db_connection()
-    cur = conn.cursor()
-    sql = """
-        SELECT br.id, p.product_name, br.request_date, br.status, br.returned_date
-        FROM borrow_requests br
-        JOIN products p ON br.product_id = p.id  
-        WHERE br.user_id = %s ORDER BY br.request_date DESC
-    """
-    cur.execute(sql, (user_id,))
-    requests = [{'id': r[0], 'product': r[1], 'date': str(r[2]), 'status': r[3], 'returned_date': str(r[4]) if r[4] else None
-    } for r in cur.fetchall()]
-    
-    conn.close()
-    return jsonify(requests), 200
+    uid = request.user_data['user_id']
+    try:
+        docs = db.collection('borrow_requests')\
+            .where('user_id', '==', uid)\
+            .order_by('request_date', direction=firestore.Query.DESCENDING)\
+            .stream()
+            
+        requests = []
+        for doc in docs:
+            r = doc.to_dict()
+            # Handle date formatting
+            req_date = r.get('request_date')
+            if req_date:
+                r['date'] = req_date.strftime("%Y-%m-%d %H:%M")
+            
+            r['id'] = doc.id
+            r['product'] = r.get('product_name', 'Unknown') # Use denormalized name
+            requests.append(r)
+            
+        return jsonify(requests), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-#---DONATION REQUEST---
 @app.route('/api/donate', methods=['POST'])
 @token_required
 def request_donation():
     data = request.json
-    p_name = data.get('product_name')
-    cat = data.get('category')
-    desc = data.get('description')
-    username = data.get('donator_username') # Changed from donator_email
-
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        cur.execute("""
-            INSERT INTO donation_requests (product_name, category, description, donator_username)
-            VALUES (%s, %s, %s, %s)
-        """, (p_name, cat, desc, username))
-        conn.commit()
+        db.collection('donation_requests').add({
+            'product_name': data.get('product_name'),
+            'category': data.get('category'),
+            'description': data.get('description'),
+            'donator_username': data.get('donator_username'),
+            'status': 'donation_pending',
+            'created_at': firestore.SERVER_TIMESTAMP
+        })
         return jsonify({"message": "Donation request submitted"}), 201
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
-
-# --- EMPLOYEE ROUTES (Manage Products - CRUD) ---
-
-@app.route('/api/employee/products', methods=['POST'])
-@employee_required
-def create_product():
-    
-    data = request.json
-    product_name = data.get('product_name')
-    category = data.get('category')
-    description = data.get('description')
-    donator_username = data.get('donator_username') # Changed
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "Erreur interne du serveur (DB)"}), 500
-
-    cur = conn.cursor()
-
-    try:
-        sql = """
-            INSERT INTO products 
-            (product_name, category, description, donator_username)
-            VALUES (%s, %s, %s, %s) 
-            RETURNING id;
-        """
-        cur.execute(sql, (product_name, category, description, donator_username))
-        product_id = cur.fetchone()[0]
-        conn.commit()
-
-        return jsonify(
-            {"message": "Produit créé avec succès", "id": product_id}), 201
-
-    except Exception as e:
-        conn.rollback()
-        return jsonify(
-            {"message": f"Erreur lors de la création du produit: {e}"}), 400
-    finally:
-        conn.close()
-
-@app.route('/api/employee/products/<int:product_id>', methods=['GET'])
-@employee_required
-def get_single_product(product_id):
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "Erreur interne du serveur (DB)"}), 500
-
-    cur = conn.cursor()
-
-    try:
-        sql = """
-            SELECT id, product_name, category, description, donator_username, status 
-            FROM products 
-            WHERE id = %s;
-        """
-        cur.execute(sql, (product_id,))
-        product = cur.fetchone()
-
-        if product:
-            columns = ['id', 'product_name', 'category', 'description', 'donator_username', 'status']
-            result = dict(zip(columns, product))
-            return jsonify(result), 200
-        else:
-            return jsonify({"message": "Produit non trouvé"}), 404
-
-    except Exception as e:
-        print(f"Erreur lors de la récupération du produit: {e}")
-        return jsonify({"message": "Erreur serveur"}), 500
-    finally:
-        conn.close()
-
+# --- EMPLOYEE ROUTES ---
 
 @app.route('/api/employee/products', methods=['GET'])
-@employee_required
-def get_all_products():
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "Erreur interne du serveur (DB)"}), 500
-        
-    cur = conn.cursor()
-    
+@token_required
+@role_required(['admin', 'employee'])
+def get_all_products_employee():
+    # Firestore doesn't support complex JOINs easily. 
+    # For a small dataset, we fetch items and populate borrower info if needed.
+    # For this simplified migration, we will fetch products and their statuses.
     try:
-        sql = """
-            SELECT 
-                p.id, p.product_name, p.category, p.status, p.donator_username, p.publish_date,
-                u.username as borrower_name
-            FROM products p
-            LEFT JOIN borrow_requests br ON p.id = br.product_id AND br.status = 'approved'
-            LEFT JOIN personnal_infos u ON br.user_id = u.id
-            ORDER BY p.id DESC;
-        """
-        cur.execute(sql)
-        
-        columns = ['id', 'product_name', 'category', 'status', 'donator_username', 'publish_date', 'borrower_name']
-        products = [dict(zip(columns, r)) for r in cur.fetchall()]
-        
-        for p in products:
-            p['publish_date'] = str(p['publish_date'])
-        
+        docs = db.collection('products').order_by('publish_date', direction=firestore.Query.DESCENDING).stream()
+        products = []
+        for doc in docs:
+            p = doc.to_dict()
+            p['id'] = doc.id
+            products.append(p)
         return jsonify(products), 200
-        
     except Exception as e:
-        print(f"Erreur lors de la récupération des produits: {e}")
-        return jsonify({"message": "Erreur serveur"}), 500
-    finally:
-        conn.close()
+        return jsonify({"error": str(e)}), 500
 
+@app.route('/api/employee/products', methods=['POST'])
+@token_required
+@role_required(['admin', 'employee'])
+def create_product():
+    data = request.json
+    try:
+        new_prod = {
+            'product_name': data.get('product_name'),
+            'category': data.get('category'),
+            'description': data.get('description'),
+            'donator_username': data.get('donator_username'),
+            'status': 'available',
+            'publish_date': firestore.SERVER_TIMESTAMP
+        }
+        update_time, ref = db.collection('products').add(new_prod)
+        return jsonify({"message": "Product created", "id": ref.id}), 201
+    except Exception as e:
+        return jsonify({"message": str(e)}), 400
 
-@app.route('/api/employee/products/<int:product_id>', methods=['PUT'])
-@employee_required
+@app.route('/api/employee/products/<product_id>', methods=['PUT'])
+@token_required
+@role_required(['admin', 'employee'])
 def update_product(product_id):
     data = request.json
-
-    product_name = data.get('product_name')
-    category = data.get('category')
-    description = data.get('description')
-    donator_username = data.get('donator_username') # Changed
-    status = data.get('status')
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "Erreur interne du serveur (DB)"}), 500
-
-    cur = conn.cursor()
-
     try:
-        sql = """
-            UPDATE products 
-            SET product_name = %s, 
-                category = %s, 
-                description = %s, 
-                donator_username = %s, 
-                status = %s
-            WHERE id = %s 
-            RETURNING id;
-        """
-        cur.execute(sql, (product_name, category, description, donator_username, status, product_id ))
-
-        updated_id = cur.fetchone()
-
-        if updated_id:
-            conn.commit()
-            return jsonify({"message": "Produit mis à jour"}), 200
-        else:
-            conn.rollback()
-            return jsonify({"message": "Produit non trouvé"}), 404
-
+        db.collection('products').document(product_id).update({
+            'product_name': data.get('product_name'),
+            'category': data.get('category'),
+            'description': data.get('description'),
+            'donator_username': data.get('donator_username'),
+            'status': data.get('status')
+        })
+        return jsonify({"message": "Product updated"}), 200
     except Exception as e:
-        conn.rollback()
-        print(f"Erreur lors de la mise à jour du produit: {e}")
-        return jsonify({"message": f"Erreur de mise à jour: {e}"}), 400
-    finally:
-        conn.close()
+        return jsonify({"message": str(e)}), 400
 
-
-@app.route('/api/employee/products/<int:product_id>', methods=['DELETE'])
-@employee_required
+@app.route('/api/employee/products/<product_id>', methods=['DELETE'])
+@token_required
+@role_required(['admin', 'employee'])
 def delete_product(product_id):
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"message": "Erreur interne du serveur (DB)"}), 500
-
-    cur = conn.cursor()
-
     try:
-        cur.execute("DELETE FROM products WHERE id = %s RETURNING id;",
-                    (product_id,))
-        deleted_id = cur.fetchone()
-
-        if deleted_id:
-            conn.commit()
-            return jsonify({
-                               "message": "Produit supprimé"}), 204  # 204 No Content pour une suppression réussie
-        else:
-            return jsonify({"message": "Produit non trouvé"}), 404
-
+        db.collection('products').document(product_id).delete()
+        return jsonify({"message": "Product deleted"}), 204
     except Exception as e:
-        conn.rollback()
-        return jsonify(
-            {"message": f"Erreur lors de la suppression du produit: {e}"}), 500
-    finally:
-        conn.close()
+        return jsonify({"message": str(e)}), 500
 
+@app.route('/api/employee/products/<product_id>', methods=['GET'])
+@token_required
+@role_required(['admin', 'employee'])
+def get_single_product(product_id):
+    try:
+        doc = db.collection('products').document(product_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            return jsonify(data), 200
+        return jsonify({"message": "Not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-
-# --- EMPLOYEE ROUTES (Manage Requests) ---
+# --- EMPLOYEE REQUESTS MANAGEMENT ---
 
 @app.route('/api/employee/requests', methods=['GET'])
-@employee_required
+@token_required
+@role_required(['admin', 'employee'])
 def get_all_requests():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    sql = """
-        SELECT br.id, u.username, p.product_name, br.status, br.request_date, br.returned_date
-        FROM borrow_requests br
-        JOIN personnal_infos u ON br.user_id = u.id
-        JOIN products p ON br.product_id = p.id
-        WHERE br.status = 'pending'
-    """
-    cur.execute(sql)
-    # On ajoute r[5] qui est returned_date
-    requests = [{
-        'id': r[0], 
-        'username': r[1], 
-        'product': r[2], 
-        'status': r[3], 
-        'date': str(r[4]),
-        'returned_date': str(r[5]) if r[5] else 'לא צוין'
-    } for r in cur.fetchall()]
-    conn.close()
-    return jsonify(requests), 200
+    try:
+        # Get pending requests
+        docs = db.collection('borrow_requests').where('status', '==', 'pending').stream()
+        requests = []
+        for doc in docs:
+            r = doc.to_dict()
+            r['id'] = doc.id
+            
+            # Fetch Username (Manual Join)
+            user_doc = db.collection('users').document(r['user_id']).get()
+            username = user_doc.to_dict().get('username') if user_doc.exists else 'Unknown'
+            
+            requests.append({
+                'id': doc.id,
+                'username': username,
+                'product': r.get('product_name'),
+                'status': r.get('status'),
+                'date': str(r.get('request_date')),
+                'returned_date': r.get('returned_date')
+            })
+        return jsonify(requests), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/api/employee/requests/<int:req_id>', methods=['PUT'])
-@employee_required
+@app.route('/api/employee/requests/<req_id>', methods=['PUT'])
+@token_required
+@role_required(['admin', 'employee'])
 def update_request_status(req_id):
     data = request.json
-    new_status = data.get('status') # 'approved' or 'rejected'
+    new_status = data.get('status')
     
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        # 1. Mise à jour du statut de la requête
-        # Si le statut est 'rejected', on remet returned_date à NULL
+        req_ref = db.collection('borrow_requests').document(req_id)
+        req_doc = req_ref.get()
+        if not req_doc.exists: return jsonify({"message": "Not found"}), 404
+        
+        req_data = req_doc.to_dict()
+        product_id = req_data['product_id']
+        
+        batch = db.batch()
+        
         if new_status == 'rejected':
-            sql_req = "UPDATE borrow_requests SET status = %s, returned_date = NULL WHERE id = %s RETURNING product_id"
-        else:
-            sql_req = "UPDATE borrow_requests SET status = %s WHERE id = %s RETURNING product_id"
+            batch.update(req_ref, {'status': 'rejected', 'returned_date': None})
+            batch.update(db.collection('products').document(product_id), {'status': 'available'})
+        elif new_status == 'approved':
+            batch.update(req_ref, {'status': 'approved'})
+            batch.update(db.collection('products').document(product_id), {'status': 'borrowed'})
             
-        cur.execute(sql_req, (new_status, req_id))
-        result = cur.fetchone()
-        
-        if result:
-            product_id = result[0]
-            
-            if new_status == 'approved':
-                # Produit prêté
-                cur.execute("UPDATE products SET status = 'borrowed' WHERE id = %s", (product_id,))
-            elif new_status == 'rejected':
-                # Produit refusé -> redevient disponible
-                cur.execute("UPDATE products SET status = 'available' WHERE id = %s", (product_id,))
-                
-            conn.commit()
-            return jsonify({"message": "Status updated and date cleared if rejected"}), 200
-        else:
-            return jsonify({"message": "Request not found"}), 404
+        batch.commit()
+        return jsonify({"message": "Status updated"}), 200
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
-# --- EMPLOYEE ROUTES (DONATIONS Requests) ---
-
-@app.route('/api/employee/donations', methods=['GET'])
-@employee_required
-def get_donations():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id, product_name, category, description, donator_username, created_at FROM donation_requests WHERE status = 'donation_pending' ORDER BY created_at DESC")
-    dons = [{'id':r[0], 'product_name':r[1], 'category':r[2], 'description':r[3], 'donator_username':r[4], 'created_at':str(r[5])} for r in cur.fetchall()]
-    conn.close()
-    return jsonify(dons), 200
-
-@app.route('/api/employee/donations/<int:don_id>/reject', methods=['DELETE'])
-@employee_required
-def reject_donation(don_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM donation_requests WHERE id = %s", (don_id,))
-    conn.commit()
-    conn.close()
-    return '', 204
-
-@app.route('/api/employee/donations/<int:don_id>/approve', methods=['POST'])
-@employee_required
-def approve_donation(don_id):
-    data = request.json
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            INSERT INTO products (product_name, category, description, donator_username, status)
-            VALUES (%s, %s, %s, %s, 'available')
-        """, (data['product_name'], data['category'], data['description'], data['donator_username']))
-        
-        cur.execute("UPDATE donation_requests SET status = 'approved' WHERE id = %s", (don_id,))
-        
-        conn.commit()
-        return jsonify({"message": "Donation converted to product"}), 201
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
-
-# --- Early Return ---
-@app.route('/api/return', methods=['POST'])
-@token_required
-def return_product():
-    data = request.json
-    borrow_id = data.get('borrow_id')
-    user_id = request.user_data['user_id']
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    try:
-        # Verify the borrow request belongs to the user and is currently active (approved)
-        cur.execute("SELECT product_id FROM borrow_requests WHERE id = %s AND user_id = %s AND status = 'approved'", (borrow_id, user_id))
-        result = cur.fetchone()
-
-        if not result:
-            return jsonify({"message": "Borrow request not found or not active."}), 404
-
-        product_id = result[0]
-
-        # 1. Mark the request as 'returned' (Historical record)
-        cur.execute("UPDATE borrow_requests SET status = 'returned' WHERE id = %s", (borrow_id,))
-
-        # 2. Mark the product as 'available' in the catalog
-        cur.execute("UPDATE products SET status = 'available' WHERE id = %s", (product_id,))
-
-        conn.commit()
-        return jsonify({"message": "Product returned successfully"}), 200
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
-
-# --- EXTENSION Requests ---
+# --- EXTENSIONS ---
 
 @app.route('/api/extensions', methods=['POST'])
 @token_required
@@ -671,188 +435,255 @@ def request_extension():
     borrow_id = data.get('borrow_id')
     new_date = data.get('new_returned_date')
     
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        # Check if an extension request is already pending for this loan.
-        cur.execute("SELECT id FROM extension_requests WHERE borrow_id = %s AND status = 'extension_pending'", (borrow_id,))
-        if cur.fetchone():
-            return jsonify({"message": "כבר קיימת בקשת הארכה ממתינה עבור מוצר זה."}), 400
-
-        cur.execute("""
-            INSERT INTO extension_requests (borrow_id, new_returned_date)
-            VALUES (%s, %s)
-        """, (borrow_id, new_date))
-        
-        conn.commit()
-        return jsonify({"message": "בקשת ההארכה נשלחה בהצלחה! ממתין לאישור עובד."}), 201
+        # Check existing
+        existing = db.collection('extension_requests')\
+            .where('borrow_id', '==', borrow_id)\
+            .where('status', '==', 'extension_pending').get()
+            
+        if len(existing) > 0:
+             return jsonify({"message": "בקשה ממתינה כבר קיימת"}), 400
+             
+        db.collection('extension_requests').add({
+            'borrow_id': borrow_id,
+            'new_returned_date': new_date,
+            'status': 'extension_pending',
+            'user_id': request.user_data['user_id'] # Add user_id for easier querying
+        })
+        return jsonify({"message": "Request sent"}), 201
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
-# List extension requests
 @app.route('/api/employee/extensions', methods=['GET'])
-@employee_required
-def get_extension_requests():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    sql = """
-        SELECT er.id, u.username, p.product_name, br.returned_date, er.new_returned_date
-        FROM extension_requests er
-        JOIN borrow_requests br ON er.borrow_id = br.id
-        JOIN personnal_infos u ON br.user_id = u.id
-        JOIN products p ON br.product_id = p.id
-        WHERE er.status = 'extension_pending'
-    """
-    cur.execute(sql)
-    results = cur.fetchall()
-    extensions = [{
-        'id': r[0],
-        'username': r[1],
-        'product_name': r[2],
-        'current_return_date': str(r[3]),
-        'new_return_date': str(r[4])
-    } for r in results]
-    conn.close()
-    return jsonify(extensions), 200
+@token_required
+@role_required(['admin', 'employee'])
+def get_extension_requests_emp():
+    try:
+        docs = db.collection('extension_requests').where('status', '==', 'extension_pending').stream()
+        exts = []
+        for doc in docs:
+            e = doc.to_dict()
+            # Fetch related details (Manual Join)
+            borrow_doc = db.collection('borrow_requests').document(e['borrow_id']).get()
+            if borrow_doc.exists:
+                b_data = borrow_doc.to_dict()
+                user_doc = db.collection('users').document(b_data['user_id']).get()
+                username = user_doc.to_dict().get('username') if user_doc.exists else 'Unknown'
+                
+                exts.append({
+                    'id': doc.id,
+                    'username': username,
+                    'product_name': b_data.get('product_name'),
+                    'current_return_date': b_data.get('returned_date'),
+                    'new_return_date': e.get('new_returned_date')
+                })
+        return jsonify(exts), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-#  Approve or Reject the extension
-@app.route('/api/employee/extensions/<int:ext_id>', methods=['PUT'])
-@employee_required
+@app.route('/api/employee/extensions/<ext_id>', methods=['PUT'])
+@token_required
+@role_required(['admin', 'employee'])
 def update_extension_status(ext_id):
     data = request.json
     status = data.get('status') # 'approved' or 'rejected'
+    new_status = f"extension_{status}"
     
-    new_status = f"extension_{status}" # Transforme en 'extension_approved' ou 'extension_rejected' -- decision---
-    
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
+        ext_ref = db.collection('extension_requests').document(ext_id)
+        ext_doc = ext_ref.get()
+        if not ext_doc.exists: return jsonify({"message": "Not found"}), 404
+        
+        batch = db.batch()
+        batch.update(ext_ref, {'status': new_status})
+        
         if status == 'approved':
-            cur.execute("SELECT borrow_id, new_returned_date FROM extension_requests WHERE id = %s", (ext_id,))
-            res = cur.fetchone()
-            if res:
-                borrow_id, new_date = res
-                cur.execute("UPDATE borrow_requests SET returned_date = %s WHERE id = %s", (new_date, borrow_id))
-        
-        cur.execute("UPDATE extension_requests SET status = %s WHERE id = %s", (new_status, ext_id))
-        
-        conn.commit()
-        return jsonify({"message": f"Extension status updated to {new_status}"}), 200
+            borrow_id = ext_doc.to_dict()['borrow_id']
+            new_date = ext_doc.to_dict()['new_returned_date']
+            batch.update(db.collection('borrow_requests').document(borrow_id), {'returned_date': new_date})
+            
+        batch.commit()
+        return jsonify({"message": "Updated"}), 200
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
-# --- ADMIN ROUTES (Manage Users) ---
-@app.route('/api/admin/users', methods=['GET', 'OPTIONS'])
-@admin_required
+# --- DONATIONS EMPLOYEE ---
+
+@app.route('/api/employee/donations', methods=['GET'])
+@token_required
+@role_required(['admin', 'employee'])
+def get_donations_emp():
+    try:
+        docs = db.collection('donation_requests').where('status', '==', 'donation_pending').stream()
+        res = []
+        for doc in docs:
+            d = doc.to_dict()
+            d['id'] = doc.id
+            d['created_at'] = str(d.get('created_at'))
+            res.append(d)
+        return jsonify(res), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/employee/donations/<don_id>/approve', methods=['POST'])
+@token_required
+@role_required(['admin', 'employee'])
+def approve_donation(don_id):
+    data = request.json
+    try:
+        # Create product
+        new_prod = {
+            'product_name': data.get('product_name'),
+            'category': data.get('category'),
+            'description': data.get('description'),
+            'donator_username': data.get('donator_username'),
+            'status': 'available',
+            'publish_date': firestore.SERVER_TIMESTAMP
+        }
+        db.collection('products').add(new_prod)
+        
+        # Mark donation approved
+        db.collection('donation_requests').document(don_id).update({'status': 'approved'})
+        
+        return jsonify({"message": "Donation approved"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/employee/donations/<don_id>/reject', methods=['DELETE'])
+@token_required
+@role_required(['admin', 'employee'])
+def reject_donation(don_id):
+    try:
+        db.collection('donation_requests').document(don_id).delete()
+        return jsonify({"message": "Rejected"}), 204
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- RETURN PRODUCT ---
+
+@app.route('/api/return', methods=['POST'])
+@token_required
+def return_product():
+    data = request.json
+    borrow_id = data.get('borrow_id')
+    uid = request.user_data['user_id']
+    
+    try:
+        req_ref = db.collection('borrow_requests').document(borrow_id)
+        req = req_ref.get()
+        
+        if not req.exists or req.to_dict()['user_id'] != uid or req.to_dict()['status'] != 'approved':
+             return jsonify({"message": "Invalid request"}), 404
+             
+        product_id = req.to_dict()['product_id']
+        
+        batch = db.batch()
+        batch.update(req_ref, {'status': 'returned'})
+        batch.update(db.collection('products').document(product_id), {'status': 'available'})
+        batch.commit()
+        
+        return jsonify({"message": "Returned"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- ADMIN USER MANAGEMENT ---
+
+@app.route('/api/admin/users', methods=['GET'])
+@token_required
+@role_required(['admin'])
 def get_all_users():
-    if request.method == 'OPTIONS': return jsonify({}), 200
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id, full_name, username, phone_number, email, role FROM personnal_infos ORDER BY id;")
-    users = [dict(zip(['id', 'full_name', 'username', 'phone_number', 'email', 'role'], r)) for r in cur.fetchall()]
-    conn.close()
-    return jsonify(users), 200
+    try:
+        # 1. Fetch from Firestore (metadata)
+        docs = db.collection('users').stream()
+        users = []
+        for doc in docs:
+            u = doc.to_dict()
+            u['id'] = doc.id # Use UID as ID
+            users.append(u)
+        return jsonify(users), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/api/admin/users/<int:user_id>/role', methods=['PUT', 'OPTIONS'])
-@admin_required
-def update_user_role(user_id):
-    if request.method == 'OPTIONS': return jsonify({}), 200
-    new_role = request.json.get('role')
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("UPDATE personnal_infos SET role = %s WHERE id = %s;", (new_role, user_id))
-    conn.commit()
-    conn.close()
-    return jsonify({"message": "Role updated"}), 200
+@app.route('/api/admin/users/<uid>/role', methods=['PUT'])
+@token_required
+@role_required(['admin'])
+def update_user_role(uid):
+    data = request.json
+    try:
+        db.collection('users').document(uid).update({'role': data.get('role')})
+        return jsonify({"message": "Role updated"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/api/admin/users/<int:user_id>', methods=['DELETE', 'OPTIONS'])
-@admin_required
-def delete_user(user_id):
-    if request.method == 'OPTIONS': return jsonify({}), 200
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM personnal_infos WHERE id = %s;", (user_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"message": "User deleted"}), 200
+@app.route('/api/admin/users/<uid>', methods=['DELETE'])
+@token_required
+@role_required(['admin'])
+def delete_user(uid):
+    try:
+        # Delete from Firestore
+        db.collection('users').document(uid).delete()
+        # Delete from Firebase Auth
+        auth.delete_user(uid)
+        return jsonify({"message": "User deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# --- SETTINGS & LIMITS ROUTES ---
+# --- CONFIG ---
+
 @app.route('/api/config', methods=['GET'])
 def get_config():
-    """Returns the system settings (max days, max items)."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT setting_key, setting_value FROM system_settings;")
-    rows = cur.fetchall()
-    conn.close()
-    
-    settings = {row[0]: row[1] for row in rows}
-    # Provide defaults if missing
-    return jsonify({
-        "max_borrow_days": int(settings.get('max_borrow_days', 14)),
-        "max_borrow_items": int(settings.get('max_borrow_items', 3))
-    }), 200
+    try:
+        doc = db.collection('system_settings').document('config').get()
+        if doc.exists:
+            return jsonify(doc.to_dict()), 200
+        return jsonify({"max_borrow_days": 14, "max_borrow_items": 3}), 200
+    except Exception:
+        return jsonify({"max_borrow_days": 14, "max_borrow_items": 3}), 200
 
 @app.route('/api/admin/config', methods=['POST'])
-@admin_required
+@token_required
+@role_required(['admin'])
 def update_config():
-    """Updates system settings."""
     data = request.json
-    max_days = data.get('max_borrow_days')
-    max_items = data.get('max_borrow_items')
-    
-    conn = get_db_connection()
-    cur = conn.cursor()
     try:
-        # Upsert logic (Update if exists, Insert if not)
-        cur.execute("INSERT INTO system_settings (setting_key, setting_value) VALUES ('max_borrow_days', %s) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value;", (max_days,))
-        cur.execute("INSERT INTO system_settings (setting_key, setting_value) VALUES ('max_borrow_items', %s) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value;", (max_items,))
-        conn.commit()
-        return jsonify({"message": "Settings updated successfully"}), 200
+        db.collection('system_settings').document('config').set({
+            'max_borrow_days': data.get('max_borrow_days'),
+            'max_borrow_items': data.get('max_borrow_items')
+        }, merge=True)
+        return jsonify({"message": "Config updated"}), 200
     except Exception as e:
-        conn.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route('/api/borrow-status', methods=['GET'])
 @token_required
 def get_borrow_status():
-    """Checks how many items the user has currently borrowed vs the limit."""
-    user_id = request.user_data['user_id']
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Get Limits
-    cur.execute("SELECT setting_key, setting_value FROM system_settings;")
-    rows = cur.fetchall()
-    settings = {row[0]: row[1] for row in rows}
-    max_items = int(settings.get('max_borrow_items', 3))
-    max_days = int(settings.get('max_borrow_days', 14))
-
-    # Count active requests (pending or approved)
-    cur.execute("SELECT COUNT(*) FROM borrow_requests WHERE user_id = %s AND status IN ('pending', 'approved', 'confirmation_pending')", (user_id,))
-    current_count = cur.fetchone()[0]
-    
-    conn.close()
-    
-    return jsonify({
-        "current_borrowed": current_count,
-        "max_items": max_items,
-        "remaining_slots": max_items - current_count,
-        "max_days": max_days
-    }), 200
+    uid = request.user_data['user_id']
+    try:
+        # Get Config
+        settings_ref = db.collection('system_settings').document('config').get()
+        settings = settings_ref.to_dict() if settings_ref.exists else {}
+        max_items = int(settings.get('max_borrow_items', 3))
+        max_days = int(settings.get('max_borrow_days', 14))
+        
+        # Count active loans
+        # Note: Streaming all is inefficient for large scale, but fine for MVP
+        docs = db.collection('borrow_requests')\
+            .where('user_id', '==', uid)\
+            .where('status', 'in', ['pending', 'approved', 'confirmation_pending'])\
+            .stream()
+            
+        current_count = sum(1 for _ in docs)
+        
+        return jsonify({
+            "current_borrowed": current_count,
+            "max_items": max_items,
+            "remaining_slots": max_items - current_count,
+            "max_days": max_days
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Reads the string "True" or "False" from .env and converts to boolean
-    debug_mode = os.getenv("FLASK_DEBUG", "False").lower() in ('true', '1', 't')
-
-
-    app.run(debug=debug_mode, port=5230, host='0.0.0.0')
-
+    # Cloud Run will set PORT env var, defaults to 8080
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
