@@ -476,7 +476,6 @@
             localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
         }
         if (localStorage.getItem('theme') === 'dark') document.body.classList.add('dark-mode');
-        // -------------------
 
         function switchTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -492,47 +491,79 @@
             const password = document.getElementById('loginPassword').value;
 
             try {
-                // Firebase Auth Login
+                // 1. Login to Firebase Auth directly from the browser
                 const userCredential = await window.signInWithEmailAndPassword(window.auth, email, password);
-                const user = userCredential.user;
+                const token = await userCredential.user.getIdToken();
 
-                // Get Token
-                const token = await user.getIdToken();
-
-                // Store Token
+                // 2. Save the secure token
                 localStorage.setItem('userToken', token);
 
-                // Redirect...
-                window.location.href = 'user_dashboard.html';
+                // 3. Ask the Python Backend for the user's role (Admin, Employee, User)
+                const profileRes = await fetch(`${API_URL}/user/me`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (profileRes.ok) {
+                    const userData = await profileRes.json();
+                    localStorage.setItem('userRole', userData.role);
+                    localStorage.setItem('username', userData.username);
+
+                    const successMsg = document.getElementById('loginSuccess');
+                    successMsg.innerText = `✓ שלום ${userData.username}, התחברת בהצלחה!`;
+                    successMsg.classList.add('show');
+
+                    // 4. Send them to the correct dashboard
+                    setTimeout(() => {
+                        if (userData.role === 'admin') window.location.href = 'admin_dashboard.html';
+                        else if (userData.role === 'employee') window.location.href = 'employee_dashboard.html';
+                        else window.location.href = 'user_dashboard.html';
+                    }, 1000);
+                } else {
+                    alert("שגיאה במשיכת נתוני משתמש מהשרת");
+                }
             } catch (error) {
-                alert("Login Failed: " + error.message);
+                console.error(error);
+                alert("Login Failed: פרטים שגויים");
             }
         }
 
         async function handleRegister(event) {
             event.preventDefault();
-            const formData = {
-                fullName: document.getElementById('fullName').value,
-                username: document.getElementById('username').value,
-                phone_number: document.getElementById('phone_number').value,
-                email: document.getElementById('registerEmail').value,
-                password: document.getElementById('registerPassword').value
-            };
+            const email = document.getElementById('registerEmail').value;
+            const password = document.getElementById('registerPassword').value;
+
             try {
+                // 1. Create the user in Firebase Auth FIRST
+                const userCredential = await window.createUserWithEmailAndPassword(window.auth, email, password);
+                const uid = userCredential.user.uid;
+
+                // 2. Send the extra details (Name, Phone) AND the UID to the Python backend
+                const formData = {
+                    uid: uid,
+                    email: email,
+                    fullName: document.getElementById('fullName').value,
+                    username: document.getElementById('username').value,
+                    phone_number: document.getElementById('phone_number').value
+                };
+
                 const response = await fetch(`${API_URL}/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(formData)
                 });
+
                 if (response.ok) {
                     const successMsg = document.getElementById('registerSuccess');
                     successMsg.classList.add('show');
                     setTimeout(() => { successMsg.classList.remove('show'); switchTab('login'); }, 2000);
                 } else {
                     const err = await response.json();
-                    alert("שגיאה: " + (err.message || "נסה שוב"));
+                    alert("שגיאה מול השרת: " + (err.message || "נסה שוב"));
                 }
-            } catch (error) { console.error(error); alert("שגיאה בתקשורת"); }
+            } catch (error) {
+                console.error(error);
+                alert("Registration Failed: " + error.message);
+            }
         }
 
         // --- Help Modal Logic ---
@@ -540,7 +571,6 @@
             document.getElementById('helpModal').style.display = 'flex';
             const contentDiv = document.getElementById('helpContent');
 
-            // Only fetch if empty to save bandwidth
             if (contentDiv.innerHTML.includes('טוען מידע')) {
                 try {
                     const response = await fetch('help/login_help.html');

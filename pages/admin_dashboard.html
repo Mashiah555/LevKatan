@@ -396,14 +396,14 @@
                     <td>${u.phone_number || '-'}</td>
                     <td>${u.email}</td>
                     <td>
-                        <select onchange="changeRole(${u.id}, this.value)" style="padding:4px; border-radius:4px;">
+                        <select onchange="changeRole('${u.id}', this.value)" style="padding:4px; border-radius:4px;">
                             <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
                             <option value="employee" ${u.role === 'employee' ? 'selected' : ''}>Employee</option>
                             <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
                         </select>
                     </td>
                     <td>
-                        <button class="btn-delete" onclick="deleteUser(${u.id})">
+                        <button class="btn-delete" onclick="deleteUser('${u.id}')">
                             🗑️ מחק משתמש
                         </button>
                     </td>

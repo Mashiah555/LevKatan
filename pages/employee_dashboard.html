@@ -791,8 +791,8 @@
                         <td class="status-cell">${displayStatus}</td>
                         <td>${borrowerInfo}</td> 
                         <td>
-                            <button class="btn-edit" onclick="editProduct(${p.id})">ערוך ✏️</button>
-                            <button class="btn-delete" onclick="deleteProduct(${p.id})">מחק 🗑️</button>
+                            <button class="btn-edit" onclick="editProduct('${p.id}')">ערוך ✏️</button>
+                            <button class="btn-delete" onclick="deleteProduct('${p.id}')">מחק 🗑️</button>
                         </td>
                     </tr>
                 `;
@@ -899,8 +899,8 @@
                     <td>${r.date.split(' ')[0]}</td>
                     <td style="color: #FF69B4; font-weight: bold;">${r.returned_date}</td> 
                     <td>
-                        <button class="btn-approve" onclick="updateStatus(${r.id}, 'approved')">אשר ✅</button>
-                        <button class="btn-reject" onclick="updateStatus(${r.id}, 'rejected')">דחה ❌</button>
+                        <button class="btn-approve" onclick="updateStatus('${r.id}', 'approved')">אשר ✅</button>
+                        <button class="btn-reject" onclick="updateStatus('${r.id}', 'rejected')">דחה ❌</button>
                     </td>
                 </tr>
             `).join('');
@@ -926,7 +926,7 @@
                     <td>${d.donator_username || d.donator_email}</td>
                     <td>
                         <button class="btn-edit" onclick="openApproveDonation(${JSON.stringify(d).replace(/"/g, '&quot;')})">ערוך ואשר ✏️</button>
-                        <button class="btn-reject" onclick="rejectDonation(${d.id})">דחה ❌</button>
+                        <button class="btn-reject" onclick="rejectDonation('${d.id}')">דחה ❌</button>
                     </td>
                 </tr>
             `).join('');
@@ -982,8 +982,8 @@
                     <td style="color: grey;">${ext.current_return_date}</td>
                     <td style="color: var(--brand-pink); font-weight: bold;">${ext.new_return_date}</td>
                     <td>
-                        <button class="btn-approve" onclick="handleExtension(${ext.id}, 'approved')">אשר ✅</button>
-                        <button class="btn-reject" onclick="handleExtension(${ext.id}, 'rejected')">דחה ❌</button>
+                        <button class="btn-approve" onclick="handleExtension('${ext.id}', 'approved')">אשר ✅</button>
+                        <button class="btn-reject" onclick="handleExtension('${ext.id}', 'rejected')">דחה ❌</button>
                     </td>
                 </tr>
             `).join('');

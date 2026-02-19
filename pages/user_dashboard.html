@@ -751,7 +751,7 @@
 
             // Compact Pill Rendering
             container.innerHTML = filtered.map(p => `
-                <div class="card" onclick="openPopup(${p.id})">
+                <div class="card" onclick="openPopup('${p.id}')">
                     <div class="cat-tag">
                         <img src="../images/${p.category}.png" class="cat-img" onerror="this.style.display='none'">
                         <span>${translateCategory(p.category)}</span>
@@ -910,8 +910,8 @@
 
                 if (r.status === 'approved') {
                     buttonsHtml += `
-                        <button class="btn-borrow" style="background-color: var(--brand-pink); border-radius:20px; margin-top:10px;" onclick="requestExtension(${r.id})">בקשת הארכת השאלה ⏳</button>
-                        <button class="btn-borrow" style="background-color: #4CAF50; border-radius:20px; margin-top:5px;" onclick="returnItem(${r.id})">החזר מוצר ↩️</button>
+                        <button class="btn-borrow" style="background-color: var(--brand-pink); border-radius:20px; margin-top:10px;" onclick="requestExtension('${r.id}')">בקשת הארכת השאלה ⏳</button>
+                        <button class="btn-borrow" style="background-color: #4CAF50; border-radius:20px; margin-top:5px;" onclick="returnItem('${r.id}')">החזר מוצר ↩️</button>
                     `;
                 }
 
