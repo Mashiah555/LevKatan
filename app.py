@@ -98,7 +98,7 @@ def role_required(allowed_roles):
 
 # --- AUTH ROUTES ---
 
-# Note: Login is handled entirely on the Frontend using Firebase SDK.
+# Login is handled entirely on the Frontend using Firebase SDK.
 # This route creates the User Document in Firestore after they sign up.
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -189,8 +189,6 @@ def borrow_product():
         max_days = int(settings.get('max_borrow_days', 14))
 
         # 2. Check User's Current Borrow Count
-        # Firestore cannot easily do "count" without reading, but 'count()' aggregation is available in newer SDKs.
-        # For simplicity, we stream query.
         active_requests = db.collection('borrow_requests')\
             .where('user_id', '==', uid)\
             .where('status', 'in', ['pending', 'approved', 'confirmation_pending'])\
@@ -686,4 +684,5 @@ def get_borrow_status():
 if __name__ == '__main__':
     # Cloud Run will set PORT env var, defaults to 8080
     port = int(os.environ.get('PORT', 8080))
+
     app.run(host='0.0.0.0', port=port)
