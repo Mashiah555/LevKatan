@@ -5,8 +5,7 @@
 
 # Firebase private keys
 lev-katan-firebase.json
-*firebase.json
-firebase.json
+*-firebase.json
 
 ### Firebase Patch ###
 .runtimeconfig.json
