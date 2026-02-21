@@ -7,26 +7,6 @@
     <title>לב קטן - התחברות</title>
     <link rel="icon" href="../images/transparent logo.png" type="image/png">
 
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-
-        const firebaseConfig = {
-            apiKey: "AIzaSyCzm8NEZTrhZ_bcosd4vcRWKgnlze14lJA",
-            authDomain: "lev-katan.firebaseapp.com",
-            projectId: "lev-katan",
-            storageBucket: "lev-katan.firebasestorage.app",
-            messagingSenderId: "1092225971684",
-            appId: "1:1092225971684:web:43dac4235e36220abd43f1"
-        };
-
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        window.auth = auth; // Expose for functions
-        window.signInWithEmailAndPassword = signInWithEmailAndPassword;
-        window.createUserWithEmailAndPassword = createUserWithEmailAndPassword;
-    </script>
-
     <style>
         :root {
             --bg-gradient-light: linear-gradient(135deg, #FFB6C1 0%, #FFC0CB 50%, #FFE4E1 100%);
@@ -467,17 +447,35 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+
+        // --- PASTE YOUR FIREBASE CONFIG HERE ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyCzm8NEZTrhZ_bcosd4vcRWKgnlze14lJA",
+            authDomain: "lev-katan.firebaseapp.com",
+            projectId: "lev-katan",
+            storageBucket: "lev-katan.firebasestorage.app",
+            messagingSenderId: "1092225971684",
+            appId: "1:1092225971684:web:43dac4235e36220abd43f1"
+        };
+
+        // 2. INITIALIZE FIREBASE
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        // --- UPDATE THIS URL WITH YOUR NEW FIREBASE FUNCTION URL ---
         const API_URL = "https://levkatan-api-klbxxliwwq-uc.a.run.app/api";
 
         // --- Theme Logic ---
-        function toggleTheme() {
+        window.toggleTheme = function () {
             document.body.classList.toggle('dark-mode');
             localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
         }
         if (localStorage.getItem('theme') === 'dark') document.body.classList.add('dark-mode');
 
-        function switchTab(tab) {
+        window.switchTab = function (tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
             document.querySelectorAll('.form-section').forEach(f => f.classList.remove('active'));
@@ -485,14 +483,14 @@
             else document.getElementById('registerForm').classList.add('active');
         }
 
-        async function handleLogin(event) {
+        window.handleLogin = async function (event) {
             event.preventDefault();
             const email = document.getElementById('loginEmail').value;
             const password = document.getElementById('loginPassword').value;
 
             try {
                 // 1. Login to Firebase Auth directly from the browser
-                const userCredential = await window.signInWithEmailAndPassword(window.auth, email, password);
+                const userCredential = await signInWithEmailAndPassword(auth, email, password);
                 const token = await userCredential.user.getIdToken();
 
                 // 2. Save the secure token
@@ -527,14 +525,14 @@
             }
         }
 
-        async function handleRegister(event) {
+        window.handleRegister = async function (event) {
             event.preventDefault();
             const email = document.getElementById('registerEmail').value;
             const password = document.getElementById('registerPassword').value;
 
             try {
                 // 1. Create the user in Firebase Auth FIRST
-                const userCredential = await window.createUserWithEmailAndPassword(window.auth, email, password);
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
                 const uid = userCredential.user.uid;
 
                 // 2. Send the extra details (Name, Phone) AND the UID to the Python backend
@@ -567,7 +565,7 @@
         }
 
         // --- Help Modal Logic ---
-        async function openHelpModal() {
+        window.openHelpModal = async function () {
             document.getElementById('helpModal').style.display = 'flex';
             const contentDiv = document.getElementById('helpContent');
 
@@ -586,11 +584,11 @@
             }
         }
 
-        function closeHelpModal() {
+        window.closeHelpModal = function () {
             document.getElementById('helpModal').style.display = 'none';
         }
 
-        function closeModalOnOutside(event) {
+        window.closeModalOnOutside = function (event) {
             if (event.target === document.getElementById('helpModal')) {
                 closeHelpModal();
             }
