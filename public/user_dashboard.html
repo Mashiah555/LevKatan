@@ -678,7 +678,7 @@
         if (localStorage.getItem('theme') === 'dark') document.body.classList.add('dark-mode');
 
         // --- Auth Check ---
-        if (!token) window.location.href = 'login_page.html';
+        if (!token) window.location.href = 'index.html';
         document.getElementById('userGreeting').innerText = `שלום, ${username || 'אורח'}`;
 
         // --- Dynamic Nav ---
@@ -1144,7 +1144,7 @@
         function closeHelpModal() { document.getElementById('helpModal').style.display = 'none'; }
         function closeHelpOnOutside(e) { if (e.target === document.getElementById('helpModal')) closeHelpModal(); }
 
-        function logout() { localStorage.clear(); window.location.href = 'login_page.html'; }
+        function logout() { localStorage.clear(); window.location.href = 'index.html'; }
 
         // Init
         loadProducts();

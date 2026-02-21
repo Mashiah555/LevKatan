@@ -692,11 +692,11 @@
         }
         if (localStorage.getItem('theme') === 'dark') document.body.classList.add('dark-mode');
 
-        if (!token) window.location.href = 'login_page.html';
+        if (!token) window.location.href = 'index.html';
         document.getElementById('userGreeting').innerText = username;
         if (role === 'admin') document.getElementById('dynamicNav').innerHTML = `<a href="admin_dashboard.html" class="nav-item">🔒 ניהול אדמין</a>`;
 
-        function logout() { localStorage.clear(); window.location.href = 'login_page.html'; }
+        function logout() { localStorage.clear(); window.location.href = 'index.html'; }
 
         function switchTab(tabId) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));

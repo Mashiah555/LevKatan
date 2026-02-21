@@ -55,12 +55,12 @@ class TestLevKatanSelenium:
 
         # Tester la structure de routage en vérifiant que les pages existent et sont accessibles
         import os
-        login_page_path = os.path.join(os.getcwd(), "pages", "login_page.html")
-        user_dashboard_path = os.path.join(os.getcwd(), "pages", "user_dashboard.html")
-        admin_dashboard_path = os.path.join(os.getcwd(), "pages", "admin_dashboard.html")
+        login_page_path = os.path.join(os.getcwd(), "index.html")
+        user_dashboard_path = os.path.join(os.getcwd(), "user_dashboard.html")
+        admin_dashboard_path = os.path.join(os.getcwd(), "admin_dashboard.html")
 
         # Vérifier que les fichiers existent
-        assert os.path.exists(login_page_path), "Le fichier login_page.html devrait exister"
+        assert os.path.exists(login_page_path), "Le fichier index.html devrait exister"
         assert os.path.exists(user_dashboard_path), "Le fichier user_dashboard.html devrait exister"
         assert os.path.exists(admin_dashboard_path), "Le fichier admin_dashboard.html devrait exister"
 
@@ -126,7 +126,7 @@ class TestLevKatanSelenium:
         driver = setup_driver
         # Charger le dashboard utilisateur pour accéder au catalogue
         import os
-        user_dashboard_path = os.path.join(os.getcwd(), "pages", "user_dashboard.html")
+        user_dashboard_path = os.path.join(os.getcwd(), "user_dashboard.html")
         driver.get(f"file://{user_dashboard_path}")
 
         # Attendre que la page se charge
@@ -183,7 +183,7 @@ class TestLevKatanSelenium:
         driver = setup_driver
         # Charger le dashboard admin pour accéder aux demandes
         import os
-        admin_dashboard_path = os.path.join(os.getcwd(), "pages", "admin_dashboard.html")
+        admin_dashboard_path = os.path.join(os.getcwd(), "admin_dashboard.html")
         driver.get(f"file://{admin_dashboard_path}")
 
         # Attendre que la page se charge (avec gestion d'alertes)
@@ -242,7 +242,7 @@ class TestLevKatanSelenium:
         driver = setup_driver
         # Charger le dashboard admin pour voir la liste des emprunts
         import os
-        admin_dashboard_path = os.path.join(os.getcwd(), "pages", "admin_dashboard.html")
+        admin_dashboard_path = os.path.join(os.getcwd(), "admin_dashboard.html")
         driver.get(f"file://{admin_dashboard_path}")
 
         # Attendre que la page se charge (avec gestion d'alertes)
@@ -303,7 +303,7 @@ class TestLevKatanSelenium:
         driver = setup_driver
         # Charger le dashboard admin pour accéder à la gestion des produits
         import os
-        admin_dashboard_path = os.path.join(os.getcwd(), "pages", "admin_dashboard.html")
+        admin_dashboard_path = os.path.join(os.getcwd(), "admin_dashboard.html")
         driver.get(f"file://{admin_dashboard_path}")
 
         # Attendre que la page se charge (avec gestion d'alertes)
