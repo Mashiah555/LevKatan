@@ -344,7 +344,7 @@
         if (localStorage.getItem('theme') === 'dark') document.body.classList.add('dark-mode');
         // -------------------
 
-        if (!token || localStorage.getItem('userRole') !== 'admin') window.location.href = 'index.html';
+        if (!token || localStorage.getItem('userRole') !== 'admin') window.location.href = '/';
         document.getElementById('userGreeting').innerText = `${username}`;
 
         let allUsers = []; // Store users globally
@@ -460,7 +460,7 @@
         // Call this on load
         loadSettings();
 
-        function logout() { localStorage.clear(); window.location.href = 'index.html'; }
+        function logout() { localStorage.clear(); window.location.href = '/'; }
         loadUsers();
     </script>
 </body>

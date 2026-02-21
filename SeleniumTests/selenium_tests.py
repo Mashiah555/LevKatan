@@ -55,7 +55,7 @@ class TestLevKatanSelenium:
 
         # Tester la structure de routage en vérifiant que les pages existent et sont accessibles
         import os
-        login_page_path = os.path.join(os.getcwd(), "index.html")
+        login_page_path = os.path.join(os.getcwd(), "/")
         user_dashboard_path = os.path.join(os.getcwd(), "user_dashboard.html")
         admin_dashboard_path = os.path.join(os.getcwd(), "admin_dashboard.html")
 
