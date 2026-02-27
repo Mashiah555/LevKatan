@@ -407,7 +407,14 @@ def get_donations_emp():
             res.append(d)
         return jsonify(res), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        error_details = traceback.format_exc()
+        print(error_details) # Forces it into Google Logs
+        return jsonify({
+            "error": "Backend crashed!", 
+            "details": str(e), 
+            "trace": error_details
+        }), 500
 
 @app.route('/api/employee/donations/<don_id>/approve', methods=['POST'])
 @token_required

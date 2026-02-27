@@ -916,29 +916,69 @@
             loadRequests();
         }
 
-        async function loadDonations() {
-            const res = await fetch(`${API_URL}/employee/donations`, { headers: { 'Authorization': `Bearer ${token}` } });
-            const dons = await res.json();
-            document.getElementById('donationsTableBody').innerHTML = dons.map(d => `
-                <tr>
-                    <td>${d.created_at.split(' ')[0]}</td>
-                    <td>${d.product_name}</td>
-                    <td>${d.donator_username || d.donator_email}</td>
-                    <td>
-                        <button class="btn-edit" onclick="openApproveDonation(${JSON.stringify(d).replace(/"/g, '&quot;')})">ערוך ואשר ✏️</button>
-                        <button class="btn-reject" onclick="rejectDonation('${d.id}')">דחה ❌</button>
-                    </td>
-                </tr>
-            `).join('');
+        window.donationsData = {};
+
+        window.loadDonations = async function () {
+            try {
+                const response = await fetch(`${API_URL}/employee/donations`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (!response.ok) {
+                    console.error("Server error:", response.status);
+                    return;
+                }
+
+                const dons = await response.json();
+                if (!Array.isArray(dons)) return;
+
+                // Clear the dictionary for fresh data
+                window.donationsData = {};
+
+                const htmlRows = dons.map(d => {
+                    // Safely save the full object to our dictionary using its unique ID
+                    window.donationsData[d.id] = d;
+
+                    // Safely handle formatting
+                    const dateStr = d.created_at ? d.created_at.split(' ')[0] : 'חסר תאריך';
+                    const username = d.donator_username || d.donator_email || 'אנונימי';
+
+                    // ONLY pass the tiny ID string into the HTML, not the whole object!
+                    return `
+                        <tr>
+                            <td>${dateStr}</td>
+                            <td>${d.product_name}</td>
+                            <td>${username}</td>
+                            <td>
+                                <button class="btn-edit" onclick="openApproveDonation('${d.id}')">ערוך ואשר ✏️</button>
+                                <button class="btn-reject" onclick="rejectDonation('${d.id}')">דחה ❌</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+
+                const tableBody = document.getElementById('donationsTableBody');
+                if (tableBody) {
+                    tableBody.innerHTML = htmlRows;
+                } else {
+                    console.error("CRITICAL UI ERROR: Could not find an element with id='donationsTableBody'");
+                }
+            } catch (error) {
+                console.error("Crash during loadDonations:", error);
+            }
         }
 
-        function openApproveDonation(don) {
+        window.openApproveDonation = function (id) {
+            // Retrieve the untouched, perfect object from the background dictionary
+            const don = window.donationsData[id];
+            if (!don) return;
+
             document.getElementById('don_id').value = don.id;
             document.getElementById('don_name').value = don.product_name;
             document.getElementById('don_category').value = don.category;
-            document.getElementById('don_description').value = don.description;
-            // Trying to use username, falling back to email if needed, or empty
+            document.getElementById('don_description').value = don.description || '';
             document.getElementById('don_username').value = don.donator_username || don.donator_email || '';
+
             document.getElementById('donationModal').style.display = 'flex';
         }
 
